@@ -15,6 +15,9 @@ import { FloatingChatWidget } from './components/FloatingChatWidget.js';
 import { ErrorState } from './components/ErrorState.js';
 import { LoadingState } from './components/LoadingState.js';
 import { AnalysisReport, ScanStageUpdate, TargetType } from './types/analysis.js';
+import { FALLBACK_SAMPLES } from './data/fallbackSamples.js';
+import { safeFetchJson } from './utils/apiClient.js';
+import { runClientSideUrlAnalysis, runClientSideMessageAnalysis } from './utils/clientFallbackAnalyzer.js';
 
 const INITIAL_URL_STAGES: ScanStageUpdate[] = [
   { stageId: 'checking_url', label: 'Checking URL format & protocol...', status: 'in_progress' },
@@ -29,7 +32,7 @@ const INITIAL_URL_STAGES: ScanStageUpdate[] = [
 export default function App() {
   const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
   const [currentReport, setCurrentReport] = useState<AnalysisReport | null>(null);
-  const [samples, setSamples] = useState<AnalysisReport[]>([]);
+  const [samples, setSamples] = useState<AnalysisReport[]>(FALLBACK_SAMPLES);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [activeScanTarget, setActiveScanTarget] = useState<string>('');
   const [activeScanType, setActiveScanType] = useState<TargetType>('url');
@@ -47,17 +50,17 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Fetch sample scans on load
+  // Fetch sample scans on load (retains FALLBACK_SAMPLES if backend is unavailable)
   useEffect(() => {
-    fetch('/api/samples')
-      .then((res) => res.json())
+    safeFetchJson<{ samples: AnalysisReport[] }>('/api/samples')
       .then((data) => {
-        if (data.samples && Array.isArray(data.samples)) {
+        if (data.samples && Array.isArray(data.samples) && data.samples.length > 0) {
           setSamples(data.samples);
         }
       })
       .catch((err) => {
-        console.warn('Failed to load sample scans:', err);
+        // Retain FALLBACK_SAMPLES cleanly without throwing or crashing
+        console.info('Running in static client mode (using built-in sample reports):', err.message);
       });
   }, []);
 
@@ -68,15 +71,16 @@ export default function App() {
     if (currentPath.startsWith('/result/')) {
       const reportId = currentPath.replace('/result/', '').trim();
       if (reportId && (!currentReport || currentReport.id !== reportId)) {
+        // First check if it's already in loaded samples
+        const found = samples.find((s) => s.id === reportId) || FALLBACK_SAMPLES.find((s) => s.id === reportId);
+        if (found) {
+          setCurrentReport(found);
+          setErrorMessage(null);
+          return;
+        }
+
         setIsFetchingResult(true);
-        fetch(`/api/result/${reportId}`)
-          .then(async (res) => {
-            if (!res.ok) {
-              const err = await res.json();
-              throw new Error(err.error || 'Report not found');
-            }
-            return res.json();
-          })
+        safeFetchJson<{ report: AnalysisReport }>(`/api/result/${reportId}`)
           .then((data) => {
             setCurrentReport(data.report);
             setErrorMessage(null);
@@ -89,7 +93,7 @@ export default function App() {
           });
       }
     }
-  }, [currentPath]);
+  }, [currentPath, samples]);
 
   const navigateTo = (path: string) => {
     window.history.pushState({}, '', path);
@@ -118,17 +122,15 @@ export default function App() {
         body: JSON.stringify({ url }),
       });
 
-      if (!res.ok || !res.body) {
-        // Fallback to regular JSON endpoint
-        const fallbackRes = await fetch('/api/analyze/url', {
+      const contentType = res.headers.get('content-type') || '';
+
+      if (!res.ok || !res.body || !contentType.includes('text/event-stream')) {
+        // Fallback to regular JSON endpoint with safe parsing
+        const fallbackData = await safeFetchJson<{ success: boolean; report: AnalysisReport }>('/api/analyze/url', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url }),
         });
-        const fallbackData = await fallbackRes.json();
-        if (!fallbackRes.ok || !fallbackData.success) {
-          throw new Error(fallbackData.error || 'Failed to analyze target URL.');
-        }
         setCurrentReport(fallbackData.report);
         navigateTo(`/result/${fallbackData.report.id}`);
         return;
@@ -192,9 +194,17 @@ export default function App() {
         throw new Error('Analysis completed without returning a valid report object.');
       }
     } catch (err: unknown) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'An unexpected error occurred during URL evaluation.'
-      );
+      console.warn('[TrustLens] Server probe unavailable, running browser heuristic analysis:', err);
+      // Graceful client-side fallback (e.g. when hosted on Netlify static hosting)
+      try {
+        const clientReport = runClientSideUrlAnalysis(url);
+        setCurrentReport(clientReport);
+        navigateTo(`/result/${clientReport.id}`);
+      } catch (clientErr: any) {
+        setErrorMessage(
+          clientErr instanceof Error ? clientErr.message : 'An unexpected error occurred during URL evaluation.'
+        );
+      }
     } finally {
       setIsLoading(false);
     }
@@ -213,16 +223,11 @@ export default function App() {
 
     try {
       const startTime = Date.now();
-      const res = await fetch('/api/analyze/message', {
+      const data = await safeFetchJson<{ success: boolean; report: AnalysisReport }>('/api/analyze/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message }),
       });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to analyze message content.');
-      }
 
       const elapsed = Date.now() - startTime;
       if (elapsed < 1800) {
@@ -232,9 +237,16 @@ export default function App() {
       setCurrentReport(data.report);
       navigateTo(`/result/${data.report.id}`);
     } catch (err: unknown) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'An unexpected error occurred during message evaluation.'
-      );
+      console.warn('[TrustLens] Message API unavailable, running client message analysis:', err);
+      try {
+        const clientReport = runClientSideMessageAnalysis(message);
+        setCurrentReport(clientReport);
+        navigateTo(`/result/${clientReport.id}`);
+      } catch (clientErr: any) {
+        setErrorMessage(
+          clientErr instanceof Error ? clientErr.message : 'An unexpected error occurred during message evaluation.'
+        );
+      }
     } finally {
       setIsLoading(false);
     }

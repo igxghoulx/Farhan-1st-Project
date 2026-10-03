@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MarkdownRenderer } from '../components/MarkdownRenderer.js';
+import { safeFetchJson } from '../utils/apiClient.js';
 import {
   MessageSquare,
   Send,
@@ -102,7 +103,7 @@ export const ChatPage: React.FC<ChatPageProps> = ({ onNavigate, initialContext }
         text: m.text,
       }));
 
-      const res = await fetch('/api/chat', {
+      const data = await safeFetchJson<{ reply: string; modelUsed: string }>('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -112,12 +113,6 @@ export const ChatPage: React.FC<ChatPageProps> = ({ onNavigate, initialContext }
         }),
       });
 
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.error || `Server responded with status ${res.status}`);
-      }
-
-      const data = await res.json();
       const modelMessage: ChatMessageItem = {
         id: `model-${Date.now()}`,
         role: 'model',
@@ -129,10 +124,15 @@ export const ChatPage: React.FC<ChatPageProps> = ({ onNavigate, initialContext }
       setMessages((prev) => [...prev, modelMessage]);
     } catch (err: any) {
       console.error('Chat error:', err);
+      const isStaticHosting = err.message && (err.message.includes('HTML') || err.message.includes('empty'));
+      const errorText = isStaticHosting
+        ? `⚠️ **Backend Service Offline (Static Hosting):**\n\nThe Gemini AI Chatbot requires the full-stack Node.js server to run. On static hosting providers like Netlify, the server process (\`server.ts\`) is not active. Deploy to a full-stack host (e.g. Render, Railway, Google Cloud Run) or run \`node server.ts\` to enable live chat with Gemini.`
+        : `⚠️ **Unable to complete response:** ${err.message || 'Please check your connection and try again.'}`;
+
       const errorMessage: ChatMessageItem = {
         id: `err-${Date.now()}`,
         role: 'model',
-        text: `⚠️ **Unable to complete response:** ${err.message || 'Please check your connection and try again.'}`,
+        text: errorText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, errorMessage]);

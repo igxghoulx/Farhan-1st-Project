@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
+import { safeFetchJson } from '../utils/apiClient.js';
 import {
   MessageSquare,
   X,
@@ -65,7 +66,7 @@ export const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
         text: m.text,
       }));
 
-      const res = await fetch('/api/chat', {
+      const data = await safeFetchJson<{ reply: string; modelUsed: string }>('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -74,11 +75,6 @@ export const FloatingChatWidget: React.FC<FloatingChatWidgetProps> = ({
         }),
       });
 
-      if (!res.ok) {
-        throw new Error('Chat failed');
-      }
-
-      const data = await res.json();
       const modelMsg: ChatMessageItem = {
         id: `w-model-${Date.now()}`,
         role: 'model',
