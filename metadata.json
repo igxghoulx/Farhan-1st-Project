@@ -1,0 +1,6 @@
+{
+  "name": "TrustLens AI",
+  "description": "Check before you trust. Automated cybersecurity risk assessment analyzing observable technical and textual signals with AI-powered explanations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
